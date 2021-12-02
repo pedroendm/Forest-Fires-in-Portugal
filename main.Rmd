@@ -14,6 +14,34 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Data importation, clean-up and pre-processing
 
+```{include=FALSE}
+setwd('/home/pedromota/dm1/Forest-Fires-in-Portugal/')
+```
+
+## Data Importation
+Read the .csv file, containing the training data, as a tibble.
+``` {echo=TRUE}
+ds <- as_tibble(read_csv("fires_train.csv", na = c("-", "NA")))
+```
+
+Drop column "alert_source", because it's all missing values. We may, also, drop the column "village_veget_area", and the columns "region", "district", "municipality" and "parish", because they are redundant. In the case of the attribute "village_veget_area", it is redundant because it's simply the sum of the attributes "village_area" and "veget_area" and, in the case of the attributes "region", "district", "municipality" and "parish", it's because we already have the coordinates in the attributes "lat" and "lon", which defines precisely the location of the fire. 
+```{echo=FALSE}
+ds <- select(ds, -(region:parish))
+```
+
+Regarding the latitude and longitude coordinates, they are 2 features that represent a three dimensional space, which means that the longitude coordinate goes all around, which presents a problem, because the two most extreme values are actually very close together. In order to solve this problem, we converted the coordinates into to a x, y, and z coordinate space. In this space, close points are also close in reality.
+
+Font: https://datascience.stackexchange.com/questions/13567/ways-to-deal-with-longitude-latitude-feature
+
+D
+```{echo=FALSE}
+ds <- select(ds, -alert_source)
+```
+
+```{echo=FALSE}
+ds <- select(ds, -village_veget_area) 
+```
+
 # Data exploratory analysis
 
 # Predictive modelling 
