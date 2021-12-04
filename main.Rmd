@@ -16,6 +16,8 @@ knitr::opts_chunk$set(echo = TRUE)
 library(readr)
 library(tibble)
 library(dplyr)
+library(stringr)
+library(lubridate)
 ```
 
 # Data importation, clean-up and pre-processing
@@ -33,7 +35,7 @@ ds <- as_tibble(read_csv("fires_train.csv", na = c("-", "NA")))
 Drop column "alert_source", because it's all missing values. We may, also, drop the column "village_veget_area", and the columns "region", "district", "municipality" and "parish", because they are redundant. In the case of the attribute "village_veget_area", it is redundant because it's simply the sum of the attributes "village_area" and "veget_area" and, in the case of the attributes "region", "district", "municipality" and "parish", it's because we already have the coordinates in the attributes "lat" and "lon", which defines precisely the location of the fire. 
 
 ```{r, echo=FALSE}
-ds <- select(ds, -alert_source, -village_veget_area, -(region:parish))
+ds <- select(ds, -alert_source, -village_veget_area, -total_area, -(region:parish))
 ```
 
 COORDENADAS
@@ -69,14 +71,68 @@ coordinates_to_decimal <- function(ds) {
 ds <- coordinates_to_decimal(ds)
 ```
 
-Paste X_hour in X_date.
 ```{r}
-ds$alert_date = as.POSIXct(paste(format(ds$alert_date, format="%Y-%m-%d"), ds$alert_hour), tz='UTC')
-ds$extinction_date = as.POSIXct(paste(format(ds$extinction_date, format="%Y-%m-%d"), ds$extinction_hour), tz='UTC')
-ds$firstInterv_date = as.POSIXct(paste(format(ds$firstInterv_date, format="%Y-%m-%d"), ds$firstInterv_hour), tz='UTC')
-ds <- select(-alert_hour, -extinction_hour, -firstInterv_hour)
+# Drop observations with missing values for these columns 
+ds <- drop_na(ds, extinction_date, extinction_hour)
+ds <- drop_na(ds, firstInterv_date, firstInterv_hour)
+
+
+# Drop time attribute in the dates, since they are wrong. The time is given by the column X_time.
+ds$alert_date = as.Date(ds$alert_date)
+ds$extinction_date = as.Date(ds$extinction_date)
+ds$firstInterv_date = as.Date(ds$firstInterv_date)
+
+# Create X_datetime attributes
+ds <- mutate(ds, alert_datetime = with(ds, ymd(alert_date) + hms(alert_hour)))
+ds <- mutate(ds, extinction_datetime = with(ds, ymd(extinction_date) + hms(extinction_hour)))
+ds <- mutate(ds, firstInterv_datetime = with(ds, ymd(firstInterv_date) + hms(firstInterv_hour)))
+
+# Remove old original attributes
+ds <- select(ds, -alert_date, -alert_hour)
+ds <- select(ds, -extinction_date, -extinction_hour)
+ds <- select(ds, -firstInterv_date, -firstInterv_hour)
+
+#We made the assumption that the time since the start of the fire and it's alert, it's very small, thus alert_datetime gives us a good time description of the fire.
+#alert_datetime may also give the season of the fire, since it's a reference in time very close to the start of the fire.
+#CARE WITH THIS.
+
+#part_of_day == TRUE if the fire was during the am or FALSE, otherwise 
+ds <- mutate(ds, am_or_pm = ifelse(am(alert_datetime), 'am', 'pm'))
+
+# Get season of the fire
+getSeason <- function(datetime) {
+  day   = day(datetime) 
+  month = month(datetime)
+  
+  if(month == 1 | month == 2) return('winter')
+  if(month == 3 & day <= 20) return ('winter')
+  else return('spring')
+  if(month == 4 | month == 5) return('spring')
+  if(month == 6 & day <= 20) return ('spring')
+  else return('summer')
+  if(month == 7 | month == 8) return('summer')
+  if(month == 9 & day <= 20) return ('summer')
+  else return('autumn')
+  if(month == 10 | month == 11) return('autumn')
+  if(month == 12 & day <= 20) return ('autumn')
+  else return('winter')
+}
+getSeason <- Vectorize(getSeason, vectorize.args = "datetime")
+
+ds <- mutate(ds, season = getSeason(ds$alert_datetime))
+
+# Get the time (in min) that took till the extinguishing of the fire
+ds <- mutate(ds, time_combating = as.integer(difftime(extinction_datetime, firstInterv_datetime, units="mins")))
+ds <- mutate(ds, time_till_firstInterv = as.integer(difftime(firstInterv_datetime, alert_datetime, units="mins")))
+
+# Remove datetimes 
+ds <- select(ds, -alert_datetime, -extinction_datetime, -firstInterv_datetime)
 ```
 
 # Data exploratory analysis
+<!-- PLOT FIRES LOCATION-->
+<!-- PLOT FIRES SEASON AND PART OF THE DAY -->
+<!-- PLOT TIME TILL FIRST INTERV AND TIME COMBATING -->
+<!-- and their relation with the target variable-->
 
 # Predictive modelling 
