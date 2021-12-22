@@ -19,66 +19,79 @@ The ICFN - Nature and Forest Conservation Institute has the record of the list o
 
 The goal of this practical assignment is to build a machine learning model to predict the cause type of a forest fire: intentional or non-intentional.
 
-For all the analysis, we used the language R and some of its packages from the CRAN, whose we will load now, with the following commands:
-```{r,warning=FALSE,message=FALSE}
+For all the analysis, we used the language R and some of its packages from the CRAN, which we will load now:
+```{r Library importation,warning=FALSE,message=FALSE}
 library(tidyverse)
+library(dlookr)
 library(lubridate)
+library(cowplot)
+library(caret)
+library(naivebayes)
+library(pROC)
 ```
 
-## Data Importation
+# Data Importation
 Read the .csv file, containing the training data, as a tibble.
-``` {r, message=FALSE}
+``` {r Data Importation, message=FALSE}
 ds <- as_tibble(read_csv("fires_train.csv", na = c("-", "NA")))
 glimpse(ds)
 ```
 One can see that, the columns 'intentional_cause' and 'origin' are wrongly typed as 'character', when they should be of type factor. In order to do fix this, we convert their types to factors:
-```{r}
+```{r Type conversion}
+ds$id <- as.integer(ds$id)
 ds$intentional_cause <- as.factor(ds$intentional_cause)
 ds$origin <- as.factor(ds$origin)
+ds$district = as.factor(ds$district)
 ```
+
 # Data clean-up and pre-processing
 Before we start the classification task, it's very important that we access the quality of our data, since poor data quality poses several challenges to the effective data analysis.
 
 We started by looking for **missing values** and **duplicate data**.
 In order to do that, we used the package *dlookr*.
-```{r,warning=FALSE,message=FALSE}
-library(dlookr)
+```{r Overview}
+overview(ds)
 ```
-```{r}
+As one can see, there's no duplicate data, but there are a lot of missing values.
+So we went finding which columns have missing values and how many values are missing, per attribute:
+```{r Checking NAs,warning=FALSE,message=FALSE}
 ds %>% select(find_na(.)) %>% diagnose()
 ```
 
-From this diagnose, we can see that only the features *region*, *extinction_date*, *extinction_hour*, *firstInterv_date*, *firstInterv_hour* and *alert_source* have missing values. In particular, the column *alert_source* is all missing values, so we can immediately drop it:
-```{r}
+From this diagnose, we can see that only the features *region*, *extinction_date*, *extinction_hour*, *firstInterv_date*, *firstInterv_hour* and *alert_source* have missing values. 
+
+In particular, the column *alert_source* is all missing values, so we can immediately drop it:
+```{r Removing alert_source}
 ds <- select(ds, -alert_source)
 ```
 
-Regarding the feature *region*, which is the one with more missing values (1206 in total), we don't need to worry about, since we also have the coordinates of the location of the fire, in the attributes *lat* and *lon*, which completely determine the *region* and, also, the features *district*, *municipality* and *parish*, we can remove all of them, since they are redundant:
-```{r}
-ds <- select(ds, -c(region, district, municipality, parish))
+<!-- TODO: don't remove district -->
+Regarding the feature *region*, which is the one with more missing values (1206 in total), we don't need to worry about, since we also have the coordinates of the location of the fire, in the attributes *lat* and *lon*, which completely determine the *region* and, also, the features *district*, *municipality* and *parish*, so we can remove all of them, since they are redundant:
+```{r Removing region district municipality and parish}
+ds <- select(ds, -c(region, municipality, parish))
 ```
 
 Finally, the attributes related to the extinction and first intervation, since there are only a few missing cases, we didn't bother imputating the data and we just removed the observations where the missing values appeared.
-``` {r}
+``` {r Remove observations with missing values}
 ds <- drop_na(ds)
 find_na(ds)
 ```
-As one we can see, we don't have any more missing values and we have a total of 9996 observations, which is about of 97% of the initial observations, which means there was really no harm in removing the cases with missing values.
+As one we can see, we don't have any more missing values.
 
-After this, we've noticed that the attribute *village_veget_area* is redundant, since is just the sum of the feature *village_area* and *veget_area*, so we may drop it too. 
-
-```{r, echo=FALSE}
-ds <- select(ds, -village_veget_area)
+After this, we've found that the attribute *village_veget_area* and *total_area* are redundant, since they are just the sum of the feature *village_area* and *vegetation_area* and the the sum of the feature *village_area*, *vegetation_area* and *farming_area*, respectively, so we may drop them too. 
+```{r Removing village_veget_area and total_area, echo=FALSE}
+ds <- select(ds, -c(village_veget_area, total_area))
 ```
 
-Regarding the attributes *lat* and *lon*, the latitude and longitude coordinates of the location of the fire, respectively, they are represented as characters, which isn't optimal for comparisons purposes. So we could convert them into numeric values and separate, for the latitude and longitude, the degrees, minutes and seconds measures, making a total of 6 features to represent the coordinates. Having 6 features representing the coordinates seemed exaggerated and we want to avoid the curse of high-dimensionality, so we look into other ways of representing the coordinates.
+Regarding the attributes *lat* and *lon*, the latitude and longitude coordinates of the location of the fire, respectively, they are represented as characters, which isn't optimal for comparisons purposes. We could separate, for the latitude and longitude, the degrees, minutes and seconds measures and then convert them into numeric values, making a total of 6 features to represent the coordinates. Having 6 features representing the coordinates seemed exaggerated and we want to avoid the curse of high-dimensionality, so we look into other ways of representing the coordinates.
 
-The first idea was to convert the coordinates into a 3D coordinate space, where close points are also close in reality, unlike the coordinate system, where two extreme values can, actually, be very close together and we would only have 3 features.
+- The first idea was to convert the coordinates into a 3D coordinate space, where we would only have 3 features. Also, in the 3D coordinate space, close points are also close in reality, unlike in the coordinate system, where two extreme values can, actually, be very close together.
 
-The second idea was to convert the coordinates into a decimal representation. In this case, we have just 2 features to represent the coordinates and it's already in the form that will need later, in order to get the temperatures.
+- The second idea was to convert the coordinates into a decimal representation. In this case, we have just 2 features to represent the coordinates and it's already in the form that will need later, in order to get the temperatures.
 
 With this in mind and since, in our case, we are only working with latitudes and longitudes within Portugal, which means there no extreme coordinates that are very close in reality, we the choosed the decimal representation.
-```{r}
+
+```{r coordinate_to_decimal function}
 coordinate_to_decimal <- function(coordinate) {
   num = "(([0-9]+\\.[0-9]+)|([0-9]+))" # Regexp for integer and real numbers
   
@@ -90,24 +103,23 @@ coordinate_to_decimal <- function(coordinate) {
   return (parsed_coordinate[1] + parsed_coordinate[2]/60 + parsed_coordinate[3]/3600)
 }
 coordinate_to_decimal = Vectorize(coordinate_to_decimal)
-ds = mutate(ds, lat = coordinate_to_decimal(lat), lon = coordinate_to_decimal(lon))
+
+ds = mutate(ds, lat = coordinate_to_decimal(lat), lon = -1 * coordinate_to_decimal(lon))
 ```
 
-After this transformation, we've noticed that we have now missing values for the *lon* attribute. We suspected that was because of some strange values that couldn't be parsed with the function *str_extract_all*, from the package *stringr*, so went finding them. 
+Also, we've noticed that we have now missing values for the *lon* attribute. We suspected that was because of some strange values that couldn't be parsed with the function *str_extract_all*, from the package *stringr*, so we went finding them. 
 
-```{r}
-ds1 <- ds[is.na(ds$lon),]
+```{r Looking for NAs again}
+ds[is.na(ds$lon),]
 ```
 
-Only 3 observations weren't rightful parsed, which correspond to the IDs 2522, 6817 and 8690. Looking in the original data set, they have the following values for the *lon* attribute, respectively: 0.29930555555555555, 0.36041666666666666 and 0.31319444444444444. Looking at the values, they seem legitimate. In fact, they seem to be just in the decimal representation already, so we imputate them, manually.
-*TODO: THIS COULD BE A SIGNAL THAT COULD EXIST MORE DECIMAL REPRESENTATIONS, TRY ADD THIS TO THE FUNCTION, TO CAPTURE THEM AUTOMATICALLY. FOR NOW I WILL JUST DROP THEM*
-
-```{r}
+Only 3 observations weren't rightful parsed, which correspond to the IDs 2522, 6817 and 8690. Looking in the original data set, they have the following values for the *lon* attribute, respectively: 0.29930555555555555, 0.36041666666666666 and 0.31319444444444444. Looking at the values, they seem to already in a decimal representation. But, with further analysis as we will show after, we found this values to be outliers. So we may just drop it, already:
+```{r Dropping NAs again}
 ds <- drop_na(ds)
 ```
 
-Regarding the *alert_data*, *extinction_date* and *firstInterv_date* datetime attributes, we assumed that the time field is wrong and we substituted them by the attributes *alert_hour*, *extinction_hour* and *firstInterv_hour* and we called these new attributes *alert_datetime*, *extinction_datetime*  and *firstInterv_datetime*, respectively.
-```{r}
+Regarding the *alert_data*, *extinction_date* and *firstInterv_date* datetime attributes, we assumed that the time field is wrong and we substituted them by the attributes *alert_hour*, *extinction_hour* and *firstInterv_hour* and we called these new attributes *alert_datetime*, *extinction_datetime* and *firstInterv_datetime*, respectively.
+```{r Fixing datetime attributes}
 ds$alert_date = as.Date(ds$alert_date)
 ds$extinction_date = as.Date(ds$extinction_date)
 ds$firstInterv_date = as.Date(ds$firstInterv_date)
@@ -116,9 +128,10 @@ ds <- mutate(ds, alert_datetime = with(ds, ymd(alert_date) + hms(alert_hour)))
 ds <- mutate(ds, extinction_datetime = with(ds, ymd(extinction_date) + hms(extinction_hour)))
 ds <- mutate(ds, firstInterv_datetime = with(ds, ymd(firstInterv_date) + hms(firstInterv_hour)))
 
-# Remove old original attributes
 ds <- select(ds, -c(alert_date, alert_hour, extinction_date, extinction_hour, firstInterv_date, firstInterv_hour))
 ```
+
+# TEMPERATURE 
 
 Having almost fixed all data quality problems with the original data set, we tried using domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
 
@@ -126,19 +139,19 @@ These new features are:
 - **part_of_day**: which is a factor attribute, having the values *morning*, *afternoon*, *evening* and *night*.
 - **season**: which is a factor attribute, having the values *winter*, *spring*, *summer* and *autumn*.
 
-We think these new attributes are helpful, since they may explain the origin of some natural causes, when thus helping distinguish the cause of the fire, that is, our target variable.
+We think these new attributes are helpful, since they may explain the origin of some natural causes, thus helping distinguish the cause of the fire, that is, our target variable.
 
 For both of the new attributes, we made the assumption that the datetime given in the *alert_datetime* is a good approximation of the datetime of the starting of the fire, since a fire is, usually, immediately noticed.
 
 To create the *part_of_day* attribute, we did the following:
-```{r}
+```{r getPartOfDay function}
 # Part of the day: part_of_day
 # Morning 5 am to 12 pm (noon)
 # Afternoon 12 pm to 5 pm.
 # Evening 5 pm to 9 pm.
 # Night 9 pm to 4 am.
 getPartOfDay <- function (datetime) {
-  classes <- factor(c('morning', 'afternoon', 'evening', 'night'))
+  classes <- factor(c('morning', 'afternoon', 'evening', 'night'), ordered = TRUE)
   
   hour = hour(datetime)
   
@@ -152,7 +165,7 @@ ds = mutate(ds, part_of_day=getPartOfDay(alert_datetime))
 ```
 
 And for the *season* attribute:
-```{r}
+```{r getSeason function}
 getSeason <- function(datetime) {
   classes <- factor(c('winter', 'spring', 'summer', 'autumn'))
   day   = day(datetime) 
@@ -172,59 +185,121 @@ getSeason <- Vectorize(getSeason)
 ds <- mutate(ds, season = getSeason(alert_datetime))
 ```
 
-Also, regarding the *extinction_datetime* and the *firstInterv_datetime*, we think they are can provide revelant information, but not as they are. That is, it's irrelevant the datetime by itself, but the difference, in minutes, within them, may be useful. So we created the *time_combating* and *time_till_firstInterv* attributes, which are the time, in minutes, spent combating the fire and the time, in minutes, for the first intervation, respectively.
+Also, regarding the *extinction_datetime* and the *firstInterv_datetime*, we think they can provide relevant information, but not as they are. That is, it's irrelevant the datetime by itself, but the difference, in minutes, within them, may be useful. So we created the *time_combating* and *time_till_firstInterv* attributes, which are the time, in minutes, spent combating the fire and the time, in minutes, for the first intervation, respectively.
 Our hope is that there is some correlation between this new attributes and the target variable.
-
-```{r}
-# Get the time (in min) that took till the extinguishing of the fire
+```{r getting timediffs}
 ds <- mutate(ds, time_combating = as.integer(difftime(extinction_datetime, firstInterv_datetime, units="mins")))
 ds <- mutate(ds, time_till_firstInterv = as.integer(difftime(firstInterv_datetime, alert_datetime, units="mins")))
 
 ds <- select(ds, -c(alert_datetime, extinction_datetime, firstInterv_datetime))
 ```
 
+Finally, we checked if there are outliers. Namely regarding the *lat* and *lon* attributes, as one can see in the boxplots below. We considered a value to be an outlier if it's out of [1st Quartile - 1.5\*IQR, 3st Quartile + 1.5\*IQR]. 
+```{r Boxplot for the lat and lon attribute}
+lon_boxplot <- ggplot(ds) + geom_boxplot(aes(x = "Longitude", y=lon))
+lat_boxplot <- ggplot(ds) + geom_boxplot(aes(x = "Latitude", y=lat))
 
-Finally, we decided to normalize our numeric variables, using the *z-score* method, in order to avoid attributes of larger magnitude dominating any aggregation function used in the predictive models.
-
-Z-score normalization
-```{r}
-ds <- mutate_if(ds, is.numeric, scale)
+plot_grid(lon_boxplot, lat_boxplot, labels = "AUTO")
 ```
 
-After all this pre-processing, our data set looks like this:
-```{r}
+We went further checking, for all numeric attributes, how many outliers are there: 
+```{r Checking outliers}
+ds %>% summarize(across(c(where(is.numeric), -id), ~length(boxplot(., plot=FALSE)$out)))
+```
+
+WHY WE DONT REMOVE THE OTHERS, so we just removed the outliers regarding the *lat* and *lon* attributes:
+```{r Remove outliers from lat and lon attributes}
+lat_outliers <- boxplot.stats(ds$lat)$out
+lon_outliers <- boxplot.stats(ds$lon)$out
+ds = ds[-which(ds$lat %in% c(lat_outliers) | ds$lon %in% c(lon_outliers)),]
+```
+
+Relatively to the data cleaning and pre-processing, we think that we are good. 
+We're still missing the normalization of the values, but that will be done after a exploratory analysis.
+
+A final glimpse:
+```{r Final glimpse}
 glimpse(ds)
 ```
 
 # Data exploratory analysis
+```{r}
+ggplot(ds, aes(x = season)) + geom_bar() + ggtitle("Fire distribution by season.")
+```
+```{r}
+ggplot(ds, aes(x = part_of_day)) + geom_bar() + ggtitle("Fire distribution by part of day")
+```
 
+```{r}
+ggplot(ds, aes(x=lon, y =lat)) + geom_point(aes(color=origin)) + ggtitle("Types of fires by latitude and longitude") + xlab("Longitude") + ylab("Latitude")
+```
+
+
+```{r}
+ggplot(ds, aes(x = village_area)) + geom_histogram(binwidth = 3000) + facet_grid(part_of_day ~ season) + ggtitle("Histogram of village area burned by part of the day and season")
+```
+
+
+```{r}
+mean(ds$lat)
+```
 # Predictive modelling
 
+Before we start with the predictive modelling, we decided to normalize our numeric variables, using the *z-score* method, in order to avoid attributes of larger magnitude dominating any aggregation function used in the predictive models.
+
+```{r Values normalization}
+ds <- mutate(ds, lon                   = as.numeric(transform(lon, method = "zscore")),
+                 lat                   = as.numeric(transform(lat, method = "zscore")),
+                 village_area          = as.numeric(transform(village_area, method = "zscore")),
+                 vegetation_area       = as.numeric(transform(vegetation_area, method = "zscore")), 
+                 farming_area          = as.numeric(transform(farming_area, method = "zscore")),
+                 time_combating        = as.numeric(transform(time_combating, method = "zscore")),
+                 time_till_firstInterv = as.numeric(transform(time_till_firstInterv, method = "zscore")))
+```
+
 1) KNN
+```{r KNN}
+ctrl <- trainControl(method  = "cv", number = 10)
+
+fit <- train(intentional_cause ~ .,
+             method     = "knn",
+             tuneGrid   = expand.grid(k = seq(1, 20, by = 2)),
+             trControl  = ctrl,
+             metric     = "Accuracy",
+             data       = ds)
+fit
+```
+
+2) Naive Bayes
 ```{r}
 set.seed(123)
- #By default, createDataPartition does a stratified random split of the data.
-library(caret)
-inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)
+inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)  # stratified random split of the data.
 
 ds_train <- ds %>% slice(inTrain)
 ds_test <- ds %>% slice(-inTrain)
 ds_test_intentional_cause <- ds_test$intentional_cause
 ds_test <- ds_test %>% select(-intentional_cause)
 
-knn.model <- knn3(intentional_cause ~ ., data = ds_train, k = 13)
-knn.model
+nb.model <- naive_bayes(intentional_cause ~ ., data = ds_train, laplace=1)
+nb.preds <- predict(nb.model, ds_test)
+nb.confM <- confusionMatrix(ds_test_intentional_cause, nb.preds)
+nb.confM
+```
+<!--
+3) Bayesian Networks
 
-knn.preds <- predict(knn.model, ds_test, type = "class")
-knn.preds
+4) DT
+```{r}
+library(rpart)
+library(rpart.plot)
+treeDs <- rpart(intentional_cause ~ ., ds)
+rpart.plot(treeDs)
 
-knn.confM <- confusionMatrix(ds_test_intentional_cause, knn.preds)
-knn.confM
+treeDs$variable.importance
+treeDs$cptable
 ```
 
-2) Naive Bayes
-3) Bayesian Networks
-4) DT
 5) Ensemble approaches
 
+-->
 # Conclusion
