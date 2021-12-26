@@ -27,7 +27,12 @@ library(lubridate)
 library(cowplot)
 library(caret)
 library(naivebayes)
-library(pROC)
+library(rpart)
+library(rpart.plot)
+library(adabag)
+library(randomForest)
+# library(ranger) - a faster implementation of random forests
+library(xgboost)
 ```
 
 # Data Importation
@@ -36,12 +41,11 @@ Read the .csv file, containing the training data, as a tibble.
 ds <- as_tibble(read_csv("fires_train.csv", na = c("-", "NA")))
 glimpse(ds)
 ```
-One can see that, the columns 'intentional_cause' and 'origin' are wrongly typed as 'character', when they should be of type factor. In order to do fix this, we convert their types to factors:
+One can see that, the columns *id*, *intentional_cause* and *origin* are wrongly typed. In order to do fix this, we convert them to their correct types:
 ```{r Type conversion}
 ds$id <- as.integer(ds$id)
 ds$intentional_cause <- as.factor(ds$intentional_cause)
 ds$origin <- as.factor(ds$origin)
-ds$district = as.factor(ds$district)
 ```
 
 # Data clean-up and pre-processing
@@ -65,13 +69,23 @@ In particular, the column *alert_source* is all missing values, so we can immedi
 ds <- select(ds, -alert_source)
 ```
 
-<!-- TODO: don't remove district -->
-Regarding the feature *region*, which is the one with more missing values (1206 in total), we don't need to worry about, since we also have the coordinates of the location of the fire, in the attributes *lat* and *lon*, which completely determine the *region* and, also, the features *district*, *municipality* and *parish*, so we can remove all of them, since they are redundant:
+Regarding the feature *region*, which is the one with more missing values (1206 in total), we don't need to worry about imputating the data, since we think, for our analysis, the information given by the *region* is too much broader. The same analysis is applied to the attributes *municipality* and *parish*, but, in both of them, the information in them is too specific. Also, we have the attributes *lat* and *lon*, which completely determines the location of the fire. Hence, we just kept the *district* attribute, which is in a sweet spot between specificity and vagueness.
 ```{r Removing region district municipality and parish}
 ds <- select(ds, -c(region, municipality, parish))
 ```
 
-Finally, the attributes related to the extinction and first intervation, since there are only a few missing cases, we didn't bother imputating the data and we just removed the observations where the missing values appeared.
+Concerning the variable *district*, we went finding which districts and how many are there, in our data set.
+```{r}
+distinct(data.frame(ds$district))
+```
+
+As we can see, there are 19 different districts, but, two of them ("Viana do Castelo" and "Viana Do Castelo") refer to the same district ("Viana do Castelo"), due to capitalization. So we normalized all cases with "Viana Do Castelo" to "Viana do Castelo":
+```{r}
+ds$district[ds$district == "Viana Do Castelo"] = "Viana do Castelo"
+ds$district <- as.factor(ds$district)
+```
+
+Finally, the attributes related to the extinction and first intervation, since there are only a few missing cases, we didn't bother imputating the data and probably adding bias to our data, so we just removed the observations where the missing values appeared.
 ``` {r Remove observations with missing values}
 ds <- drop_na(ds)
 find_na(ds)
@@ -131,12 +145,16 @@ ds <- mutate(ds, firstInterv_datetime = with(ds, ymd(firstInterv_date) + hms(fir
 ds <- select(ds, -c(alert_date, alert_hour, extinction_date, extinction_hour, firstInterv_date, firstInterv_hour))
 ```
 
-# TEMPERATURE 
+We'll now gather some data, regarding the temperature and the precipitation of the fires:
+```{r Temp and Prcp}
+```
 
-Having almost fixed all data quality problems with the original data set, we tried using domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
+Having almost fixed all data quality problems with the original data set, we tried to use our domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
 
 These new features are:
+
 - **part_of_day**: which is a factor attribute, having the values *morning*, *afternoon*, *evening* and *night*.
+
 - **season**: which is a factor attribute, having the values *winter*, *spring*, *summer* and *autumn*.
 
 We think these new attributes are helpful, since they may explain the origin of some natural causes, thus helping distinguish the cause of the fire, that is, our target variable.
@@ -194,7 +212,7 @@ ds <- mutate(ds, time_till_firstInterv = as.integer(difftime(firstInterv_datetim
 ds <- select(ds, -c(alert_datetime, extinction_datetime, firstInterv_datetime))
 ```
 
-Finally, we checked if there are outliers. Namely regarding the *lat* and *lon* attributes, as one can see in the boxplots below. We considered a value to be an outlier if it's out of [1st Quartile - 1.5\*IQR, 3st Quartile + 1.5\*IQR]. 
+Finally, we checked if there are outliers. Namely regarding the *lat* and *lon* attributes, as one can see in the boxplots below. We considered a value to be an outlier if it's out of the range [1st Quartile - 1.5\*IQR, 3st Quartile + 1.5\*IQR]. 
 ```{r Boxplot for the lat and lon attribute}
 lon_boxplot <- ggplot(ds) + geom_boxplot(aes(x = "Longitude", y=lon))
 lat_boxplot <- ggplot(ds) + geom_boxplot(aes(x = "Latitude", y=lat))
@@ -207,18 +225,20 @@ We went further checking, for all numeric attributes, how many outliers are ther
 ds %>% summarize(across(c(where(is.numeric), -id), ~length(boxplot(., plot=FALSE)$out)))
 ```
 
-WHY WE DONT REMOVE THE OTHERS, so we just removed the outliers regarding the *lat* and *lon* attributes:
+We just removed the outliers regarding the *lat* and *lon* attributes:
 ```{r Remove outliers from lat and lon attributes}
 lat_outliers <- boxplot.stats(ds$lat)$out
 lon_outliers <- boxplot.stats(ds$lon)$out
 ds = ds[-which(ds$lat %in% c(lat_outliers) | ds$lon %in% c(lon_outliers)),]
 ```
 
-Relatively to the data cleaning and pre-processing, we think that we are good. 
-We're still missing the normalization of the values, but that will be done after a exploratory analysis.
+We didn't remove the outliers from the other features, since we think that they aren't noise, as in the *lat* and *lon*, but informative to our prediction task.
+
+Relatively to the data cleaning and pre-processing, we are done. Regarding the normalization of the values, vital to some methods, that will be done after the exploratory analysis.
 
 A final glimpse:
 ```{r Final glimpse}
+ds = relocate(ds, intentional_cause, .after = last_col())
 glimpse(ds)
 ```
 
@@ -234,72 +254,114 @@ ggplot(ds, aes(x = part_of_day)) + geom_bar() + ggtitle("Fire distribution by pa
 ggplot(ds, aes(x=lon, y =lat)) + geom_point(aes(color=origin)) + ggtitle("Types of fires by latitude and longitude") + xlab("Longitude") + ylab("Latitude")
 ```
 
-
-```{r}
-ggplot(ds, aes(x = village_area)) + geom_histogram(binwidth = 3000) + facet_grid(part_of_day ~ season) + ggtitle("Histogram of village area burned by part of the day and season")
-```
-
-
-```{r}
-mean(ds$lat)
-```
 # Predictive modelling
 
-Before we start with the predictive modelling, we decided to normalize our numeric variables, using the *z-score* method, in order to avoid attributes of larger magnitude dominating any aggregation function used in the predictive models.
-
-```{r Values normalization}
-ds <- mutate(ds, lon                   = as.numeric(transform(lon, method = "zscore")),
-                 lat                   = as.numeric(transform(lat, method = "zscore")),
-                 village_area          = as.numeric(transform(village_area, method = "zscore")),
-                 vegetation_area       = as.numeric(transform(vegetation_area, method = "zscore")), 
-                 farming_area          = as.numeric(transform(farming_area, method = "zscore")),
-                 time_combating        = as.numeric(transform(time_combating, method = "zscore")),
-                 time_till_firstInterv = as.numeric(transform(time_till_firstInterv, method = "zscore")))
+We'll now start, finally, the predictive modelling.
+```{r}
+ds <- select(ds, -id)
 ```
 
+
+Firstly, we will try the k-Nearest Neighboors:
 1) KNN
 ```{r KNN}
-ctrl <- trainControl(method  = "cv", number = 10)
-
 fit <- train(intentional_cause ~ .,
              method     = "knn",
-             tuneGrid   = expand.grid(k = seq(1, 20, by = 2)),
-             trControl  = ctrl,
+             tuneGrid   = expand.grid(k = seq(5, 30, by = 2)),
+             trControl  = trainControl(method  = "cv", number = 10),
              metric     = "Accuracy",
+             preProc    = c("center", "scale"),
              data       = ds)
 fit
 ```
 
-2) Naive Bayes
-```{r}
+
+```{r Data split}
 set.seed(123)
 inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)  # stratified random split of the data.
-
-ds_train <- ds %>% slice(inTrain)
-ds_test <- ds %>% slice(-inTrain)
+ds_train <- ds %>% dplyr::slice(inTrain)
+ds_test <- ds %>% dplyr::slice(-inTrain)
 ds_test_intentional_cause <- ds_test$intentional_cause
 ds_test <- ds_test %>% select(-intentional_cause)
+```
 
+2) Naive Bayes
+```{r NB}
 nb.model <- naive_bayes(intentional_cause ~ ., data = ds_train, laplace=1)
 nb.preds <- predict(nb.model, ds_test)
 nb.confM <- confusionMatrix(ds_test_intentional_cause, nb.preds)
 nb.confM
 ```
-<!--
-3) Bayesian Networks
 
-4) DT
+3) DT
 ```{r}
-library(rpart)
-library(rpart.plot)
 treeDs <- rpart(intentional_cause ~ ., ds)
 rpart.plot(treeDs)
-
-treeDs$variable.importance
-treeDs$cptable
 ```
 
-5) Ensemble approaches
+```{r}
+treeDs$variable.importance
+#treeDs$cptable
+```
 
--->
+4) Ensemble approaches
+```{r}
+set.seed(123)
+inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)
+ds_train <- ds %>% dplyr::slice(inTrain)
+ds_test <- ds %>% dplyr::slice(-inTrain)
+```
+
+4.1) Bagging
+```{r Bagging}
+#TODO: Fix this one. Taking a long time to construct the model
+#m <- bagging(intentional_cause ~ ., ds_train, mfinal = 5, control = rpart.control(maxdepth = 3))
+#preds <- predict(m, ds_test)
+#confusionMatrix(as.factor(preds$class), ds_test_intentional_cause)
+```
+
+4.1) Random Forests
+```{r Random Forests}
+m <- randomForest(intentional_cause ~ ., ds_train, importance = TRUE)
+preds <- predict(m, ds_test)
+confusionMatrix(preds, ds_test$intentional_cause)
+```
+
+```{r RF: Importance of variables}
+m$importance
+varImpPlot(m, main = "Feature Relevance Scores")
+```
+
+4.2) AdaBoost
+```{r AdaBoost}
+#TODO: Fix this one. Taking a long time to construct the model
+#m <- boosting(intentional_cause ~ ., ds_train, mfinal = 5, control = rpart.control(maxdepth = 3))
+#preds <- predict(m, ds_test)
+#confusionMatrix(factor(preds$class), ds_test$diabetes)
+```
+
+4.3) Gradient Boost Machine
+<!-- TODO: not in any HO -->
+
+4.4) XGBoost
+```{r}
+m <- xgboost(data = data.matrix(select(ds, -intentional_cause)),
+             label = as.integer(ds$intentional_cause)-1,
+             #max.depth = 2, eta = 1, nthread = 2,
+             nrounds = 100,
+             objective = "binary:logistic",
+             eval_metric = "logloss")
+
+preds <- predict(m, data.matrix(select(ds, -intentional_cause)), reshape=T)
+
+preds.class <- as.numeric(preds > 0.5)
+
+confusionMatrix(factor(preds.class), factor(as.integer(ds$intentional_cause)-1))
+```
+
+```{r}
+varImp <- xgb.importance(model=m)
+xgb.plot.importance(varImp)
+```
+
 # Conclusion
