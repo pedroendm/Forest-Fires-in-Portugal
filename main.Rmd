@@ -8,7 +8,7 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-setwd('/home/pedromota/dm1/Forest-Fires-in-Portugal/')
+setwd("C:/Users/00mot/Desktop/DM1/Forest-Fires-in-Portugal")
 ```
 
 # Introduction
@@ -24,14 +24,15 @@ For all the analysis, we used the language R and some of its packages from the C
 library(tidyverse)
 library(dlookr)
 library(lubridate)
+library(VIM)
+library(rnoaa)
 library(cowplot)
 library(caret)
 library(naivebayes)
 library(rpart)
 library(rpart.plot)
 library(adabag)
-library(randomForest)
-# library(ranger) - a faster implementation of random forests
+library(ranger)
 library(xgboost)
 ```
 
@@ -39,6 +40,7 @@ library(xgboost)
 Read the .csv file, containing the training data, as a tibble.
 ``` {r Data Importation, message=FALSE}
 ds <- as_tibble(read_csv("fires_train.csv", na = c("-", "NA")))
+#ds <- as_tibble(read_csv("fires_test.csv", na = c("-", "NA")))
 glimpse(ds)
 ```
 One can see that, the columns *id*, *intentional_cause* and *origin* are wrongly typed. In order to do fix this, we convert them to their correct types:
@@ -85,12 +87,20 @@ ds$district[ds$district == "Viana Do Castelo"] = "Viana do Castelo"
 ds$district <- as.factor(ds$district)
 ```
 
-Finally, the attributes related to the extinction and first intervation, since there are only a few missing cases, we didn't bother imputating the data and probably adding bias to our data, so we just removed the observations where the missing values appeared.
-``` {r Remove observations with missing values}
-ds <- drop_na(ds)
-find_na(ds)
+Regarding the *alert_data*, *extinction_date* and *firstInterv_date* datetime attributes, we assumed that the time field is wrong and we substituted them by the attributes *alert_hour*, *extinction_hour* and *firstInterv_hour* and we called these new attributes *alert_datetime*, *extinction_datetime* and *firstInterv_datetime*, respectively.
+```{r Fixing datetime attributes}
+ds$alert_date = as.Date(ds$alert_date)
+ds$extinction_date = as.Date(ds$extinction_date)
+ds$firstInterv_date = as.Date(ds$firstInterv_date)
+
+ds <- mutate(ds, alert_datetime = with(ds, ymd(alert_date) + hms(alert_hour)))
+ds <- mutate(ds, extinction_datetime = with(ds, ymd(extinction_date) + hms(extinction_hour)))
+ds <- mutate(ds, firstInterv_datetime = with(ds, ymd(firstInterv_date) + hms(firstInterv_hour)))
+
+ds <- select(ds, -c(alert_date, alert_hour, extinction_date, extinction_hour, firstInterv_date, firstInterv_hour))
 ```
-As one we can see, we don't have any more missing values.
+
+There are some cases with missing values for the extinction and first intervention datetimes, that we'll later imputate.
 
 After this, we've found that the attribute *village_veget_area* and *total_area* are redundant, since they are just the sum of the feature *village_area* and *vegetation_area* and the the sum of the feature *village_area*, *vegetation_area* and *farming_area*, respectively, so we may drop them too. 
 ```{r Removing village_veget_area and total_area, echo=FALSE}
@@ -128,88 +138,13 @@ ds[is.na(ds$lon),]
 ```
 
 Only 3 observations weren't rightful parsed, which correspond to the IDs 2522, 6817 and 8690. Looking in the original data set, they have the following values for the *lon* attribute, respectively: 0.29930555555555555, 0.36041666666666666 and 0.31319444444444444. Looking at the values, they seem to already in a decimal representation. But, with further analysis as we will show after, we found this values to be outliers. So we may just drop it, already:
-```{r Dropping NAs again}
-ds <- drop_na(ds)
-```
-
-Regarding the *alert_data*, *extinction_date* and *firstInterv_date* datetime attributes, we assumed that the time field is wrong and we substituted them by the attributes *alert_hour*, *extinction_hour* and *firstInterv_hour* and we called these new attributes *alert_datetime*, *extinction_datetime* and *firstInterv_datetime*, respectively.
-```{r Fixing datetime attributes}
-ds$alert_date = as.Date(ds$alert_date)
-ds$extinction_date = as.Date(ds$extinction_date)
-ds$firstInterv_date = as.Date(ds$firstInterv_date)
-
-ds <- mutate(ds, alert_datetime = with(ds, ymd(alert_date) + hms(alert_hour)))
-ds <- mutate(ds, extinction_datetime = with(ds, ymd(extinction_date) + hms(extinction_hour)))
-ds <- mutate(ds, firstInterv_datetime = with(ds, ymd(firstInterv_date) + hms(firstInterv_hour)))
-
-ds <- select(ds, -c(alert_date, alert_hour, extinction_date, extinction_hour, firstInterv_date, firstInterv_hour))
-```
-
-We'll now gather some data, regarding the temperature and the precipitation of the fires:
-```{r Temp and Prcp}
-```
-
-Having almost fixed all data quality problems with the original data set, we tried to use our domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
-
-These new features are:
-
-- **part_of_day**: which is a factor attribute, having the values *morning*, *afternoon*, *evening* and *night*.
-
-- **season**: which is a factor attribute, having the values *winter*, *spring*, *summer* and *autumn*.
-
-We think these new attributes are helpful, since they may explain the origin of some natural causes, thus helping distinguish the cause of the fire, that is, our target variable.
-
-For both of the new attributes, we made the assumption that the datetime given in the *alert_datetime* is a good approximation of the datetime of the starting of the fire, since a fire is, usually, immediately noticed.
-
-To create the *part_of_day* attribute, we did the following:
-```{r getPartOfDay function}
-# Part of the day: part_of_day
-# Morning 5 am to 12 pm (noon)
-# Afternoon 12 pm to 5 pm.
-# Evening 5 pm to 9 pm.
-# Night 9 pm to 4 am.
-getPartOfDay <- function (datetime) {
-  classes <- factor(c('morning', 'afternoon', 'evening', 'night'), ordered = TRUE)
-  
-  hour = hour(datetime)
-  
-  if (5 <= hour & hour <= 12) return (classes[1])
-  if (12 <= hour & hour <= 17) return (classes[2])
-  if(17 <= hour & hour <= 21) return (classes[3])
-  return (classes[4])
-}
-getPartOfDay = Vectorize(getPartOfDay)
-ds = mutate(ds, part_of_day=getPartOfDay(alert_datetime))
-```
-
-And for the *season* attribute:
-```{r getSeason function}
-getSeason <- function(datetime) {
-  classes <- factor(c('winter', 'spring', 'summer', 'autumn'))
-  day   = day(datetime) 
-  month = month(datetime)
-  
-  if(month == 1 | month == 2) return (classes[1])
-  if(month == 3 & day <= 20) return (classes[1])
-  if(month == 3 | month == 4 | month == 5) return (classes[2])
-  if(month == 6 & day <= 20) return (classes[2])
-  if(month == 6 | month == 7 | month == 8) return (classes[3])
-  if(month == 9 & day <= 20) return (classes[3])
-  if(month == 9 | month == 10 | month == 11) return (classes[4])
-  if(month == 12 & day <= 20) return (classes[4])
-  return (classes[1])
-}
-getSeason <- Vectorize(getSeason)
-ds <- mutate(ds, season = getSeason(alert_datetime))
-```
-
-Also, regarding the *extinction_datetime* and the *firstInterv_datetime*, we think they can provide relevant information, but not as they are. That is, it's irrelevant the datetime by itself, but the difference, in minutes, within them, may be useful. So we created the *time_combating* and *time_till_firstInterv* attributes, which are the time, in minutes, spent combating the fire and the time, in minutes, for the first intervation, respectively.
-Our hope is that there is some correlation between this new attributes and the target variable.
-```{r getting timediffs}
-ds <- mutate(ds, time_combating = as.integer(difftime(extinction_datetime, firstInterv_datetime, units="mins")))
-ds <- mutate(ds, time_till_firstInterv = as.integer(difftime(firstInterv_datetime, alert_datetime, units="mins")))
-
-ds <- select(ds, -c(alert_datetime, extinction_datetime, firstInterv_datetime))
+```{r Imputating NAs}
+ds <- mutate(ds, alert_datetime=as.integer(alert_datetime), extinction_datetime=as.integer(extinction_datetime), firstInterv_datetime=as.integer(firstInterv_datetime))
+ds <- as_tibble(kNN(ds, k=10)) %>% select(-ends_with("_imp"))
+ds <- mutate(ds, alert_datetime       = as_datetime(alert_datetime), 
+                 extinction_datetime  = as_datetime(extinction_datetime), 
+                 firstInterv_datetime = as_datetime(firstInterv_datetime))
+find_na(ds)
 ```
 
 Finally, we checked if there are outliers. Namely regarding the *lat* and *lon* attributes, as one can see in the boxplots below. We considered a value to be an outlier if it's out of the range [1st Quartile - 1.5\*IQR, 3st Quartile + 1.5\*IQR]. 
@@ -233,6 +168,59 @@ ds = ds[-which(ds$lat %in% c(lat_outliers) | ds$lon %in% c(lon_outliers)),]
 ```
 
 We didn't remove the outliers from the other features, since we think that they aren't noise, as in the *lat* and *lon*, but informative to our prediction task.
+```{r Temp and Prcp}
+source("./getTemperatureNOAA.R")
+
+#Add Temperatures and Precipitation
+add_new_values <- function(ds){
+  for(i in 1:length(ds$lat)) {
+    print(i)
+    nearby_stations = get_nearby_stations(ds$district[i],ds$lat[i], ds$lon[i])
+    ds$max_temp[i] = add_temp_max(nearby_stations, as_date( ds$alert_datetime[i]))
+    #ds$prcp[i] = add_prcp(nearby_stations,  ds$alert_date[i])
+    if(i == nrow(ds))
+      break
+  }
+  return(ds)
+}
+ds <- add_new_values(ds)
+```
+
+Having almost fixed all data quality problems with the original data set, we tried to use our domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
+
+These new features are:
+
+- ****: which is a factor attribute, having the values *morning*, *afternoon*, *evening* and *night*.
+
+- **season**: which is a factor attribute, having the values *winter*, *spring*, *summer* and *autumn*.
+
+We think these new attributes are helpful, since they may explain the origin of some natural causes, thus helping distinguish the cause of the fire, that is, our target variable.
+
+For both of the new attributes, we made the assumption that the datetime given in the *alert_datetime* is a good approximation of the datetime of the starting of the fire, since a fire is, usually, immediately noticed.
+
+```{r getSeason function}
+ds <- mutate(ds, weekday = as.factor(weekdays(alert_datetime)))
+```
+
+And for the *season* attribute:
+```{r month function}
+ds <- mutate(ds, month = as.integer(month(alert_datetime)))
+```
+
+```{r hour function}
+ds <- mutate(ds, hour = as.integer(hour(alert_datetime)))
+```
+
+Finally, regarding the *extinction_datetime* and the *firstInterv_datetime*, we think they can provide relevant information, but not as they are. That is, it's irrelevant the datetime by itself, but the difference, in minutes, within them, may be useful. So we created the *time_combating* and *time_till_firstInterv* attributes, which are the time, in minutes, spent combating the fire and the time, in minutes, for the first intervation, respectively.
+Our hope is that there is some correlation between this new attributes and the target variable.
+```{r getting timediffs}
+ds <- mutate(ds, burning_time = as.double(difftime(extinction_datetime, alert_datetime, units="mins")))
+ds$burning_time[ds$burning_time <= 0] = NA
+ds <- as_tibble(kNN(ds, k=10)) %>% select(-ends_with("_imp"))
+
+ds <- select(ds, -c(alert_datetime, extinction_datetime, firstInterv_datetime))
+```
+
 
 Relatively to the data cleaning and pre-processing, we are done. Regarding the normalization of the values, vital to some methods, that will be done after the exploratory analysis.
 
@@ -244,23 +232,19 @@ glimpse(ds)
 
 # Data exploratory analysis
 ```{r}
-ggplot(ds, aes(x = season)) + geom_bar() + ggtitle("Fire distribution by season.")
+#ggplot(ds, aes(x = season)) + geom_bar() + ggtitle("Fire distribution by season.")
 ```
 ```{r}
-ggplot(ds, aes(x = part_of_day)) + geom_bar() + ggtitle("Fire distribution by part of day")
+#ggplot(ds, aes(x = part_of_day)) + geom_bar() + ggtitle("Fire distribution by part of day")
 ```
 
 ```{r}
-ggplot(ds, aes(x=lon, y =lat)) + geom_point(aes(color=origin)) + ggtitle("Types of fires by latitude and longitude") + xlab("Longitude") + ylab("Latitude")
+#ggplot(ds, aes(x=lon, y =lat)) + geom_point(aes(color=origin)) + ggtitle("Types of fires by latitude and longitude") + xlab("Longitude") + ylab("Latitude")
 ```
 
 # Predictive modelling
 
 We'll now start, finally, the predictive modelling.
-```{r}
-ds <- select(ds, -id)
-```
-
 
 Firstly, we will try the k-Nearest Neighboors:
 1) KNN
@@ -277,36 +261,40 @@ fit
 
 
 ```{r Data split}
-set.seed(123)
-inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)  # stratified random split of the data.
-ds_train <- ds %>% dplyr::slice(inTrain)
-ds_test <- ds %>% dplyr::slice(-inTrain)
-ds_test_intentional_cause <- ds_test$intentional_cause
-ds_test <- ds_test %>% select(-intentional_cause)
+# set.seed(123)
+# inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)  # stratified random split of the data.
+# ds_train <- ds %>% dplyr::slice(inTrain)
+# ds_test <- ds %>% dplyr::slice(-inTrain)
+# ds_test_intentional_cause <- ds_test$intentional_cause
+# ds_test <- ds_test %>% select(-intentional_cause)
 ```
 
 2) Naive Bayes
 ```{r NB}
-nb.model <- naive_bayes(intentional_cause ~ ., data = ds_train, laplace=1)
-nb.preds <- predict(nb.model, ds_test)
-nb.confM <- confusionMatrix(ds_test_intentional_cause, nb.preds)
-nb.confM
+# nb.model <- naive_bayes(intentional_cause ~ ., data = ds_train, laplace=1)
+# nb.preds <- predict(nb.model, ds_test)
+# nb.confM <- confusionMatrix(ds_test_intentional_cause, nb.preds)
+# nb.confM
 ```
 
 3) DT
 ```{r}
-treeDs <- rpart(intentional_cause ~ ., ds)
-rpart.plot(treeDs)
+# treeDs <- rpart(intentional_cause ~ ., ds)
+# rpart.plot(treeDs)
 ```
 
 ```{r}
-treeDs$variable.importance
-#treeDs$cptable
+# treeDs$variable.importance
+# #treeDs$cptable
 ```
 
 4) Ensemble approaches
 ```{r}
-set.seed(123)
+#ds <- mutate(ds, burned_area = village_area + vegetation_area + farming_area)
+#ds <- select(ds, -c(village_area, vegetation_area, farming_area))
+ds <- select(ds, -parish)
+
+set.seed(43)
 inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)
 ds_train <- ds %>% dplyr::slice(inTrain)
 ds_test <- ds %>% dplyr::slice(-inTrain)
@@ -322,9 +310,24 @@ ds_test <- ds %>% dplyr::slice(-inTrain)
 
 4.1) Random Forests
 ```{r Random Forests}
-m <- randomForest(intentional_cause ~ ., ds_train, importance = TRUE)
-preds <- predict(m, ds_test)
-confusionMatrix(preds, ds_test$intentional_cause)
+costs = table(ds$intentional_cause)
+costs[1] = 1
+costs[2] = 100000
+m <- ranger(intentional_cause ~ ., 
+            data=select(ds_train, -id),
+            num.trees = 1500,
+            importance='impurity',
+            #min.node.size = 4,
+            #probability = TRUE,
+            #class.weights = costs,
+            mtry=4)
+
+preds <- predict(m, select(ds_test, -c(id,intentional_cause)))
+
+
+preds$predictions = as.factor(as.integer(preds$predictions[1:nrow(ds_test)] < 0.515))
+
+confusionMatrix(preds$predictions, ds_test$intentional_cause)
 ```
 
 ```{r RF: Importance of variables}
@@ -341,22 +344,33 @@ varImpPlot(m, main = "Feature Relevance Scores")
 ```
 
 4.3) Gradient Boost Machine
-<!-- TODO: not in any HO -->
+ TODO: not in any HO 
 
 4.4) XGBoost
 ```{r}
-m <- xgboost(data = data.matrix(select(ds, -intentional_cause)),
-             label = as.integer(ds$intentional_cause)-1,
-             #max.depth = 2, eta = 1, nthread = 2,
-             nrounds = 100,
+m2 <- m
+regressor=train(intentional_cause ~ ., data = ds_train, method = "xgbTree",trControl = trainControl("cv", number = 10),scale=T)
+m <- xgboost(data = data.matrix(select(ds_train, -c(id,intentional_cause))),
+             label = as.integer(ds_train$intentional_cause)-1,
+             max.depth=4,
+             #subsample=0.85,
+             #colsample_bytree=0.8,
+             eta=0.03,
+             nrounds = 1100, #550
+             #max_delta_step=0.9,
+             scale_pos_weight=1.4,
              objective = "binary:logistic",
-             eval_metric = "logloss")
+             eval_metric = "auc")
 
-preds <- predict(m, data.matrix(select(ds, -intentional_cause)), reshape=T)
+varImp(m)
 
+preds <- predict(m, data.matrix(select(ds_test, -c(id,intentional_cause))), reshape=T)
+preds <- predict(m, data.matrix(select(ds, -id)), reshape=T)
 preds.class <- as.numeric(preds > 0.5)
 
-confusionMatrix(factor(preds.class), factor(as.integer(ds$intentional_cause)-1))
+ds <- mutate(ds, intentional_cause=factor(preds.class))
+ds <- select(ds, c(id, intentional_cause))
+confusionMatrix(factor(preds.class), factor(ds_test$intentional_cause))
 ```
 
 ```{r}
