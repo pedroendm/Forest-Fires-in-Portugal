@@ -73,7 +73,7 @@ ds <- select(ds, -alert_source)
 
 Regarding the feature *region*, which is the one with more missing values (1206 in total), we don't need to worry about imputating the data, since we think, for our analysis, the information given by the *region* is too much broader. The same analysis is applied to the attributes *municipality* and *parish*, but, in both of them, the information in them is too specific. Also, we have the attributes *lat* and *lon*, which completely determines the location of the fire. Hence, we just kept the *district* attribute, which is in a sweet spot between specificity and vagueness.
 ```{r Removing region district municipality and parish}
-ds <- select(ds, -c(region, municipality, parish))
+ds <- select(ds, -c(region, municipality))
 ```
 
 Concerning the variable *district*, we went finding which districts and how many are there, in our data set.
@@ -137,10 +137,11 @@ Also, we've noticed that we have now missing values for the *lon* attribute. We 
 ds[is.na(ds$lon),]
 ```
 
-Only 3 observations weren't rightful parsed, which correspond to the IDs 2522, 6817 and 8690. Looking in the original data set, they have the following values for the *lon* attribute, respectively: 0.29930555555555555, 0.36041666666666666 and 0.31319444444444444. Looking at the values, they seem to already in a decimal representation. But, with further analysis as we will show after, we found this values to be outliers. So we may just drop it, already:
+Only 3 observations weren't rightful parsed, which correspond to the IDs 2522, 6817 and 8690. Looking in the original data set, they have the following values for the *lon* attribute, respectively: 0.29930555555555555, 0.36041666666666666 and 0.31319444444444444. Looking at the values, they seem to already in a decimal representation. But, with further analysis as we will show after, we found this values to be outliers. 
 ```{r Imputating NAs}
 ds <- mutate(ds, alert_datetime=as.integer(alert_datetime), extinction_datetime=as.integer(extinction_datetime), firstInterv_datetime=as.integer(firstInterv_datetime))
 ds <- as_tibble(kNN(ds, k=10)) %>% select(-ends_with("_imp"))
+
 ds <- mutate(ds, alert_datetime       = as_datetime(alert_datetime), 
                  extinction_datetime  = as_datetime(extinction_datetime), 
                  firstInterv_datetime = as_datetime(firstInterv_datetime))
@@ -164,9 +165,18 @@ We just removed the outliers regarding the *lat* and *lon* attributes:
 ```{r Remove outliers from lat and lon attributes}
 lat_outliers <- boxplot.stats(ds$lat)$out
 lon_outliers <- boxplot.stats(ds$lon)$out
-ds = ds[-which(ds$lat %in% c(lat_outliers) | ds$lon %in% c(lon_outliers)),]
+
+ds$lat[ds$lat %in% c(lat_outliers)] = NA
+ds$lon[ds$lon %in% c(lon_outliers)] = NA
 ```
 
+
+```{r}
+ds <- as_tibble(kNN(ds, variable = c("lat", "lon"), dist_var=c("district", "parish"), k=8)) %>% select(-ends_with("_imp"))
+ds <- select(ds, -parish)
+```
+
+<!--
 We didn't remove the outliers from the other features, since we think that they aren't noise, as in the *lat* and *lon*, but informative to our prediction task.
 ```{r Temp and Prcp}
 source("./getTemperatureNOAA.R")
@@ -177,13 +187,24 @@ add_new_values <- function(ds){
     print(i)
     nearby_stations = get_nearby_stations(ds$district[i],ds$lat[i], ds$lon[i])
     ds$max_temp[i] = add_temp_max(nearby_stations, as_date( ds$alert_datetime[i]))
-    #ds$prcp[i] = add_prcp(nearby_stations,  ds$alert_date[i])
+    ds$prcp[i] = add_prcp(nearby_stations,  as_date(ds$alert_datetime[i]))
     if(i == nrow(ds))
       break
   }
   return(ds)
 }
 ds <- add_new_values(ds)
+```
+-->
+
+```{r}
+maxTemp = read_csv("train_maxTemp.csv")
+prcp = read_csv("train_prcp.csv")
+
+ds = merge(ds, maxTemp, by = "id")
+ds = merge(ds, prcp, by = "id")
+
+rm(maxTemp, prcp)
 ```
 
 Having almost fixed all data quality problems with the original data set, we tried to use our domain knowledge of the data to create new features, using the original ones, hoping that they will capture new important information much more efficiently than the original features, which will help us solving the problem.
@@ -216,6 +237,7 @@ Our hope is that there is some correlation between this new attributes and the t
 ```{r getting timediffs}
 ds <- mutate(ds, burning_time = as.double(difftime(extinction_datetime, alert_datetime, units="mins")))
 ds$burning_time[ds$burning_time <= 0] = NA
+
 ds <- as_tibble(kNN(ds, k=10)) %>% select(-ends_with("_imp"))
 
 ds <- select(ds, -c(alert_datetime, extinction_datetime, firstInterv_datetime))
@@ -242,6 +264,7 @@ glimpse(ds)
 #ggplot(ds, aes(x=lon, y =lat)) + geom_point(aes(color=origin)) + ggtitle("Types of fires by latitude and longitude") + xlab("Longitude") + ylab("Latitude")
 ```
 
+
 # Predictive modelling
 
 We'll now start, finally, the predictive modelling.
@@ -261,12 +284,7 @@ fit
 
 
 ```{r Data split}
-# set.seed(123)
-# inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)  # stratified random split of the data.
-# ds_train <- ds %>% dplyr::slice(inTrain)
-# ds_test <- ds %>% dplyr::slice(-inTrain)
-# ds_test_intentional_cause <- ds_test$intentional_cause
-# ds_test <- ds_test %>% select(-intentional_cause)
+
 ```
 
 2) Naive Bayes
@@ -290,11 +308,19 @@ fit
 
 4) Ensemble approaches
 ```{r}
-#ds <- mutate(ds, burned_area = village_area + vegetation_area + farming_area)
-#ds <- select(ds, -c(village_area, vegetation_area, farming_area))
-ds <- select(ds, -parish)
+ds = ds2
 
-set.seed(43)
+# 1st alternative
+ds <- mutate(ds, burned_area = village_area + vegetation_area + farming_area)
+ds <- select(ds, -c(village_area, vegetation_area, farming_area))
+
+# 2nd alternative
+ds <- mutate(ds, human_burned_area = village_area+farming_area, non_human_burned_area = vegetation_area)
+ds <- select(ds, -c(village_area, vegetation_area, farming_area))
+
+ds <- select(ds, -c(origin))
+
+set.seed(42)
 inTrain <- createDataPartition(y = ds$intentional_cause, p = 0.7, list = FALSE)
 ds_train <- ds %>% dplyr::slice(inTrain)
 ds_test <- ds %>% dplyr::slice(-inTrain)
@@ -303,29 +329,57 @@ ds_test <- ds %>% dplyr::slice(-inTrain)
 4.1) Bagging
 ```{r Bagging}
 #TODO: Fix this one. Taking a long time to construct the model
-#m <- bagging(intentional_cause ~ ., ds_train, mfinal = 5, control = rpart.control(maxdepth = 3))
-#preds <- predict(m, ds_test)
-#confusionMatrix(as.factor(preds$class), ds_test_intentional_cause)
+m <- bagging(intentional_cause ~ ., ds_train, mfinal = 5, control = rpart.control(maxdepth = 3), par=TRUE)
+preds <- predict(m, ds_test)
+confusionMatrix(as.factor(preds$class), ds_test_intentional_cause)
 ```
 
 4.1) Random Forests
 ```{r Random Forests}
-costs = table(ds$intentional_cause)
-costs[1] = 1
-costs[2] = 100000
-m <- ranger(intentional_cause ~ ., 
+best_ntree= 0
+best_mtry = 0
+best_accuracy = 0
+
+for (ntree in c(500, 750, 1000, 1250, 1500, 1750, 2000, 2250)) {
+ for (mtry in c(2:(ncol(ds_train)-3))) {
+   m <- ranger(intentional_cause ~ ., 
             data=select(ds_train, -id),
-            num.trees = 1500,
+            num.trees = ntree, # 1800
             importance='impurity',
-            #min.node.size = 4,
+            #min.node.size = 4, 
             #probability = TRUE,
             #class.weights = costs,
-            mtry=4)
+            mtry=mtry) # 4
+   
+   preds <- predict(m, select(ds_test, -c(id,intentional_cause)))
+   print(ntree) 
+   print(mtry)
+   accuracy=sum(as.integer(preds$predictions == ds_test$intentional_cause))/nrow(ds_test)
+   print(accuracy)
+   if (accuracy > best_accuracy) {
+     best_accuracy = accuracy
+     best_ntree = ntree
+     best_mtry = mtry
+   }
+   print("--------------------")
+ } 
+}
 
-preds <- predict(m, select(ds_test, -c(id,intentional_cause)))
+m <- ranger(intentional_cause ~ ., 
+            data=select(ds, -id),
+            num.trees = 1800, # 1800
+            importance='impurity',
+            #min.node.size = 2, 
+            probability = TRUE,
+            mtry=ncol(ds)-2) # 4
+   
+preds <- predict(m, select(ds_submission, -c(id,intentional_cause, prcp)))
 
+preds <- predict(m, select(ds, -id))
 
-preds$predictions = as.factor(as.integer(preds$predictions[1:nrow(ds_test)] < 0.515))
+ds_submission = ds
+
+preds$predictions = as.factor(as.integer(preds$predictions[1:nrow(ds_submission)] < 0.60))
 
 confusionMatrix(preds$predictions, ds_test$intentional_cause)
 ```
